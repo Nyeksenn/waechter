@@ -8,10 +8,12 @@ mod error;
 
 use error::CommError;
 use smol::prelude::*;
-use smol::{Unblock, block_on};
+use smol::{Unblock, block_on, spawn};
 use smol::io::{BufReader, BufWriter};
 use smol::future::try_zip;
 use smol::channel::{unbounded, Receiver, Sender};
+use std::path::Path;
+use notify::{Config, RecommendedWatcher, Watcher, Event, Error};
 
 
 async fn accept(tx: Sender<String>) -> Result<(), CommError> {
@@ -19,10 +21,33 @@ async fn accept(tx: Sender<String>) -> Result<(), CommError> {
 
     let mut input_lines = stdin.lines();
     while let Some(line) = input_lines.next().await {
-        let msg = line?;
-        tx.send(msg).await?;
+        let tx = tx.clone();
+        let in_str = line?;
+        let cmd: Vec<&str> = in_str.split(':').collect();
+        let path_str = cmd[1].to_string();
+        if cmd.len() == 2 && ["add", "remove"].contains(&cmd[0]) {
+            spawn(async move {
+                let path = Path::new(path_str.as_str());
+                let mut watcher = RecommendedWatcher::new(
+                    move |res: Result<Event, Error>| {
+                        block_on(async  {
+                            if let Ok(ev) = res {
+                                match ev.kind {
+                                    notify::EventKind::Create(_) => tx.send(format!("add:{}", ev.paths[0].display())).await.unwrap(),
+                                    notify::EventKind::Modify(_) => tx.send(format!("change:{}", ev.paths[0].display())).await.unwrap(),
+                                    notify::EventKind::Remove(_) => tx.send(format!("delete:{}", ev.paths[0].display())).await.unwrap(),
+                                    _ => todo!()
+                                }
+                            }
+                        })
+                    },
+                    Config::default(),
+                ).unwrap();
+                let _ = watcher.watch(path, notify::RecursiveMode::NonRecursive);
+            }).detach();
+        }
     }
-    
+
     Ok(())
 }
 
@@ -44,7 +69,7 @@ async fn run() -> Result<(), CommError> {
 }
 
 fn main() {
-    match block_on(run()) {
+    match block_on(spawn(run())) {
         Ok(_) => println!("Exiting."),
         Err(_) => eprintln!("Something went wrong."),
     }
